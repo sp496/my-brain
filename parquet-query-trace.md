@@ -16,6 +16,7 @@ Dataset
             └── Column Chunks (one per column, stored separately)
                 └── Pages (smaller units within a chunk, ~1MB — encoding/compression applied here)
 ```
+![img.png](img.png)
 
 - **Partitions** are just directories on disk/object storage, derived from
   column values (Hive-style `col=value/` paths). Not part of the Parquet file
@@ -52,6 +53,20 @@ out whatever redundancy is left. A larger row group means encoding has more
 homogeneous, sorted data to exploit before it ever gets sliced into pages —
 that's why row group size still affects compression quality even though
 compression itself happens per page.
+
+---
+
+### Row group size: the pruning vs. compression trade-off
+
+Row group size affects two things in opposite directions. A row group is both the unit that gets skipped via min/max stats (Level 4) and the unit whose column chunks get encoded and compressed — so sizing it larger or smaller pulls those two benefits apart.
+
+Smaller row groups cover a narrower value range per group, so a date filter is more likely to exclude them cleanly — fewer "false positives" where a row group gets read even though only a handful of rows actually match. But every row group carries its own footer metadata (offsets, stats, encoding info per column chunk), so more row groups means more bookkeeping overhead at read time.
+
+Larger row groups give the encoding step (RLE, dictionary) a bigger, more homogeneous pool to exploit before pages are sliced out — better compression ratios and fewer footer entries overall. The cost is coarser pruning: a row group spanning a wide value range is harder to skip, so more data gets decompressed and filtered at the row level rather than skipped outright.
+
+Page-level stats (Level 6) soften this trade-off somewhat — even inside a large row group, individual pages whose value range falls entirely outside the filter can be skipped. So in practice, large row groups + page-level pruning often gets you most of both benefits.
+
+Spark/Delta defaults (~128MB row groups) are a reasonable middle ground. Tuning toward smaller groups only makes sense for point-lookup workloads; larger groups suit pure full-scan analytics. This trade-off also scales up one level: **the small files problem** is the same tension applied to files rather than row groups — many small files give finer file-level pruning (via `_delta_log` stats) but multiply footer-read overhead and hurt compression. `OPTIMIZE`/compaction fixes it by merging small files into fewer, larger ones, the same way larger row groups amortize per-chunk overhead.
 
 ---
 
